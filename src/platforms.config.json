@@ -1,0 +1,14 @@
+{
+  "axiom":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/axiom.ts",
+  "bullx":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/bullx.ts",
+  "gmgn":         "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/gmgnai.ts",
+  "lab-terminal": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/lab-terminal.ts",
+  "photon":       "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/photon.ts",
+  "trojan":       "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/primordium.ts",
+  "banana-gun":   "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/banana-gun.ts",
+  "maestro":      "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/maestro.ts",
+  "bloom":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/bloom-sol.ts",
+  "pepeboost":    "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/pepeboost.ts",
+  "nova":         "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/nova-trading.ts",
+  "vector-bot":   "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/vector.ts"
+}

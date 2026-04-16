@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/.next/
+frontend/out/
+dist/
+
+# Environment — never commit real keys
+.env
+.env.local
+.env.*.local
+
+# Runtime state — local only
+flowlens.db
+cursors.json
+
+# Claude Code internal
+.claude/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
