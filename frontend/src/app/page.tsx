@@ -1,72 +1,43 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { io, Socket } from 'socket.io-client';
 import {
   Activity,
   TrendingUp,
-  TrendingDown,
   Zap,
   RefreshCcw,
   BarChart3,
   ChevronDown,
   ArrowUpDown,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type TimeWindow = '1m' | '5m' | '30m' | '1h' | '24h';
-type SortMode = 'net' | 'volume' | 'newest';
+type SortMode   = 'volume' | 'net' | 'newest';
 
 interface TokenRow {
-  token_mint: string;
-  platform: string;
-  buy_sol: number;
-  sell_sol: number;
-  net_sol: number;
-  net_usd: number;
-  total_sol: number;
-  total_volume_usd: number;
-  dominant_platform?: string; // only present when platform=all
-  trade_count: number;
-  buy_count: number;
-  sell_count: number;
-  first_seen: number;
-  usd_estimated: number; // 1 = fallback from SOL price, 0 = real token price
+  mint:              string;
+  dominant_platform: string;
+  total_volume_sol:  number;
+  total_volume_usd:  number;
+  net_sol:           number;
+  buy_count:         number;
+  sell_count:        number;
+  first_seen:        number;
 }
 
-interface TokensResponse {
-  timestamp: number;
-  window: TimeWindow;
-  platform: string;
-  solPrice: number;
-  tokens: TokenRow[];
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-interface PlatformVolume {
-  netSol: number;
-  netUsd: number;
-  trades: number;
-}
-
-interface PlatformData {
-  volumes: Record<TimeWindow, PlatformVolume>;
-  topToken: string;
-  topTokenVolume: number;
-}
-
-interface DashboardResponse {
-  timestamp: number;
-  solPrice: number;
-  platforms: Record<string, PlatformData>;
-}
-
-// ─── Constants ─────────────────────────────────────────────────────────────────
-
-const API_BASE = '/api';
+const WS_URL    = process.env.NEXT_PUBLIC_WS_URL  ?? 'http://localhost:3001';
+const API_BASE  = '/api';
 const WINDOWS: TimeWindow[] = ['1m', '5m', '30m', '1h', '24h'];
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function shortMint(mint: string): string {
   if (!mint || mint === 'N/A') return '—';
@@ -74,30 +45,40 @@ function shortMint(mint: string): string {
 }
 
 function fmtSol(v: number): string {
+  if (v === undefined || v === null) return '0.00';
   const abs = Math.abs(v);
-  if (abs >= 1000) return `${(v / 1000).toFixed(1)}k`;
+  if (abs >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  if (abs >= 100)   return v.toFixed(1);
   return v.toFixed(2);
 }
 
 function fmtUsd(v: number): string {
+  if (v === undefined || v === null) return '$0';
   const abs = Math.abs(v);
   if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `$${(v / 1_000).toFixed(1)}k`;
+  if (abs >= 1_000)     return `$${(v / 1_000).toFixed(1)}k`;
   return `$${Math.abs(v).toFixed(0)}`;
 }
 
 function fmtAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000);
-  if (secs < 60)  return `${secs}s ago`;
+  if (secs < 60)   return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   return `${Math.floor(secs / 3600)}h ago`;
 }
 
-// ─── Copy Mint ─────────────────────────────────────────────────────────────────
+function sortTokens(tokens: TokenRow[], sortBy: SortMode): TokenRow[] {
+  return [...tokens].sort((a, b) => {
+    if (sortBy === 'net')    return Math.abs(b.net_sol)          - Math.abs(a.net_sol);
+    if (sortBy === 'newest') return b.first_seen                 - a.first_seen;
+    return b.total_volume_sol - a.total_volume_sol;
+  });
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
 
 function CopyMint({ mint }: { mint: string }) {
   const [copied, setCopied] = useState(false);
-
   function handleCopy(e: React.MouseEvent) {
     e.stopPropagation();
     navigator.clipboard.writeText(mint).then(() => {
@@ -105,7 +86,6 @@ function CopyMint({ mint }: { mint: string }) {
       setTimeout(() => setCopied(false), 1500);
     });
   }
-
   return (
     <button
       onClick={handleCopy}
@@ -120,15 +100,14 @@ function CopyMint({ mint }: { mint: string }) {
   );
 }
 
-// ─── Buy/Sell Bar ───────────────────────────────────────────────────────────────
-
-function BuySellBar({ buySol, sellSol }: { buySol: number; sellSol: number }) {
-  const total = buySol + sellSol;
+function BuySellBar({ totalSol, netSol }: { totalSol: number; netSol: number }) {
+  const total  = totalSol;
+  const buySol = (totalSol + netSol) / 2;
   if (total === 0) return <div className="w-24 h-1.5 rounded-full bg-zinc-800" />;
   const buyPct = (buySol / total) * 100;
   return (
     <div className="flex items-center gap-1.5">
-      <div className="w-20 h-1.5 rounded-full bg-zinc-800 overflow-hidden flex">
+      <div className="w-20 h-1.5 rounded-full bg-rose-500/40 overflow-hidden flex">
         <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${buyPct}%` }} />
       </div>
       <span className="text-[10px] text-zinc-500 tabular-nums w-8">{buyPct.toFixed(0)}%</span>
@@ -136,86 +115,168 @@ function BuySellBar({ buySol, sellSol }: { buySol: number; sellSol: number }) {
   );
 }
 
-// ─── Platform badge ─────────────────────────────────────────────────────────────
-
 const PLATFORM_COLORS: Record<string, string> = {
-  axiom:        'bg-blue-500/10 text-blue-400',
-  bullx:        'bg-orange-500/10 text-orange-400',
-  gmgn:         'bg-purple-500/10 text-purple-400',
-  photon:       'bg-yellow-500/10 text-yellow-400',
-  trojan:       'bg-red-500/10 text-red-400',
+  axiom:          'bg-blue-500/10 text-blue-400',
+  bullx:          'bg-orange-500/10 text-orange-400',
+  gmgn:           'bg-purple-500/10 text-purple-400',
+  photon:         'bg-yellow-500/10 text-yellow-400',
+  trojan:         'bg-red-500/10 text-red-400',
   'lab-terminal': 'bg-cyan-500/10 text-cyan-400',
-  'banana-gun': 'bg-yellow-400/10 text-yellow-300',
-  maestro:      'bg-pink-500/10 text-pink-400',
-  bloom:        'bg-teal-500/10 text-teal-400',
-  pepeboost:    'bg-green-500/10 text-green-400',
-  nova:         'bg-indigo-500/10 text-indigo-400',
-  'vector-bot': 'bg-rose-500/10 text-rose-400',
+  'banana-gun':   'bg-yellow-400/10 text-yellow-300',
+  maestro:        'bg-pink-500/10 text-pink-400',
+  bloom:          'bg-teal-500/10 text-teal-400',
+  pepeboost:      'bg-green-500/10 text-green-400',
+  nova:           'bg-indigo-500/10 text-indigo-400',
+  'vector-bot':   'bg-rose-500/10 text-rose-400',
 };
 
 function PlatformBadge({ name }: { name: string }) {
   const cls = PLATFORM_COLORS[name] ?? 'bg-zinc-800 text-zinc-400';
   return (
     <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${cls}`}>
-      {name}
+      {name || '—'}
     </span>
   );
 }
 
-// ─── Main Dashboard ─────────────────────────────────────────────────────────────
+// ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [tokensData, setTokensData]   = useState<TokensResponse | null>(null);
-  const [dashboard,  setDashboard]    = useState<DashboardResponse | null>(null);
-  const [platforms,  setPlatforms]    = useState<string[]>([]);
-  const [timeWindow, setTimeWindow]   = useState<TimeWindow>('1h');
-  const [platform,   setPlatform]     = useState<string>('all');
-  const [sortBy,     setSortBy]       = useState<SortMode>('volume');
-  const [loading,    setLoading]      = useState(true);
-  const [pfOpen,     setPfOpen]       = useState(false);
+  const [tokens,     setTokens]     = useState<TokenRow[]>([]);
+  const [platforms,  setPlatforms]  = useState<string[]>([]);
+  const [solPrice,   setSolPrice]   = useState(0);
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('1h');
+  const [platform,   setPlatform]   = useState<string>('all');
+  const [sortBy,     setSortBy]     = useState<SortMode>('volume');
+  const [wsStatus,   setWsStatus]   = useState<'connecting' | 'live' | 'offline'>('connecting');
+  const [lastUpdate, setLastUpdate] = useState(0);
+  const [pfOpen,     setPfOpen]     = useState(false);
 
-  const fetchAll = useCallback(async () => {
+  const socketRef   = useRef<Socket | null>(null);
+  const currentRoom = useRef<string>('');
+  const windowRef   = useRef(timeWindow);
+  const platformRef = useRef(platform);
+  windowRef.current   = timeWindow;
+  platformRef.current = platform;
+
+  function roomFor(win: TimeWindow, plat: string) {
+    return plat === 'all' ? `global-volume-${win}` : `platform-${plat}-${win}`;
+  }
+
+  // ── REST: fetch platforms + SOL price once / every 30s ────────────────────
+  const fetchMeta = useCallback(async () => {
     try {
-      const [tokRes, dashRes, pfRes] = await Promise.all([
-        fetch(`${API_BASE}/tokens?window=${timeWindow}&platform=${platform}&limit=50&sort=${sortBy}`),
-        fetch(`${API_BASE}/dashboard`),
-        platforms.length === 0 ? fetch(`${API_BASE}/platforms`) : Promise.resolve(null),
+      const [pfRes, hRes] = await Promise.all([
+        fetch(`${API_BASE}/platforms`),
+        fetch(`${API_BASE}/health`),
       ]);
-
-      if (tokRes.ok)  setTokensData(await tokRes.json());
-      if (dashRes.ok) setDashboard(await dashRes.json());
-      if (pfRes?.ok) {
+      if (pfRes.ok) {
         const pf = await pfRes.json();
         setPlatforms(['all', ...(pf.platforms ?? [])]);
       }
-      setLoading(false);
-    } catch (err) {
-      console.error('Fetch error:', err);
-    }
-  }, [timeWindow, platform, sortBy, platforms.length]);
+      if (hRes.ok) {
+        const h = await hRes.json();
+        setSolPrice(h.solPrice ?? 0);
+      }
+    } catch { /* ignore */ }
+  }, []);
 
   useEffect(() => {
-    fetchAll();
-    const id = setInterval(fetchAll, 5000);
+    fetchMeta();
+    const id = setInterval(fetchMeta, 30_000);
     return () => clearInterval(id);
-  }, [fetchAll]);
+  }, [fetchMeta]);
 
-  const solPrice = tokensData?.solPrice ?? dashboard?.solPrice ?? 0;
+  // ── REST: fallback fetch if WS hasn't delivered data yet ──────────────────
+  const fetchTokensRest = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/tokens?window=${windowRef.current}&platform=${platformRef.current}&limit=50&sort=volume`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setSolPrice(sp => data.solPrice || sp);
+      // Map REST response → TokenRow (same shape as WS payload)
+      const mapped: TokenRow[] = (data.tokens ?? []).map((r: any) => ({
+        mint:              r.mint,
+        dominant_platform: r.dominant_platform ?? '',
+        total_volume_sol:  r.total_volume_sol,
+        total_volume_usd:  r.total_volume_usd,
+        net_sol:           r.net_sol,
+        buy_count:         r.buy_count,
+        sell_count:        r.sell_count,
+        first_seen:        r.first_seen,
+      }));
+      setTokens(mapped);
+      setLastUpdate(Date.now());
+    } catch { /* ignore */ }
+  }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-black text-white">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ repeat: Infinity, duration: 2, ease: 'linear' }}
-        >
-          <RefreshCcw className="w-10 h-10 text-emerald-400" />
-        </motion.div>
-      </div>
-    );
-  }
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const socket = io(WS_URL, { transports: ['websocket'], reconnectionDelay: 2000 });
+    socketRef.current = socket;
 
-  const tokens = tokensData?.tokens ?? [];
+    socket.on('connect', () => {
+      setWsStatus('live');
+      const room = roomFor(windowRef.current, platformRef.current);
+      currentRoom.current = room;
+      socket.emit('join', room);
+    });
+
+    socket.on('disconnect', () => setWsStatus('offline'));
+    socket.on('connect_error', () => setWsStatus('offline'));
+
+    socket.on('volume-update', (payload: any) => {
+      // Ignore updates from rooms we've already switched away from
+      if (payload.room && payload.room !== currentRoom.current) return;
+      setTokens(payload.tokens ?? []);
+      setLastUpdate(payload.timestamp);
+      setWsStatus('live');
+    });
+
+    // Fallback REST poll while WS is offline
+    const restInterval = setInterval(() => {
+      if (socketRef.current?.connected) return;
+      fetchTokensRest();
+    }, 5_000);
+
+    // Seed with REST on first mount
+    fetchTokensRest();
+
+    return () => {
+      clearInterval(restInterval);
+      socket.disconnect();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Switch room whenever window or platform changes ───────────────────────
+  useEffect(() => {
+    const socket = socketRef.current;
+    const newRoom = roomFor(timeWindow, platform);
+
+    setTokens([]);   // clear stale data immediately
+
+    if (!socket?.connected) {
+      currentRoom.current = newRoom;
+      fetchTokensRest();
+      return;
+    }
+
+    // Leave old room first so we stop receiving its broadcasts
+    if (currentRoom.current && currentRoom.current !== newRoom) {
+      socket.emit('leave', currentRoom.current);
+    }
+    currentRoom.current = newRoom;
+    socket.emit('join', newRoom);
+
+    // Fetch REST immediately so there's no blank gap while waiting for next WS broadcast
+    fetchTokensRest();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeWindow, platform]);
+
+  const displayed = sortTokens(tokens, sortBy);
 
   return (
     <main className="min-h-screen bg-[#050505] text-white p-4 md:p-8">
@@ -237,8 +298,22 @@ export default function Dashboard() {
           </div>
           <div className="h-8 w-px bg-zinc-800" />
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs font-semibold">Live</span>
+            {wsStatus === 'live' ? (
+              <>
+                <Wifi className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-semibold text-emerald-400">Live</span>
+              </>
+            ) : wsStatus === 'connecting' ? (
+              <>
+                <RefreshCcw className="w-4 h-4 text-yellow-400 animate-spin" />
+                <span className="text-xs font-semibold text-yellow-400">Connecting</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-4 h-4 text-zinc-500" />
+                <span className="text-xs font-semibold text-zinc-500">Offline</span>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -309,21 +384,19 @@ export default function Dashboard() {
         </button>
 
         <span className="ml-auto text-[10px] text-zinc-600 flex items-center gap-1">
-          <Activity className="w-3 h-3" /> live · 5s refresh
-          {tokensData && (
-            <span className="ml-2 text-zinc-700">· updated {fmtAge(tokensData.timestamp)}</span>
-          )}
+          <Activity className="w-3 h-3" />
+          {lastUpdate > 0 ? `updated ${fmtAge(lastUpdate)}` : 'loading…'}
         </span>
       </div>
 
-      {/* ── Hot Tokens Table ── */}
+      {/* ── Token Table ── */}
       <section className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-base font-bold flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-emerald-400" />
             {platform === 'all' ? 'Global Volume Leaders' : `Most Traded on ${platform}`}
             <span className="text-xs font-normal text-zinc-500 ml-1">
-              {tokens.length} results · {timeWindow.toUpperCase()} window
+              {displayed.length} tokens · {timeWindow.toUpperCase()} window
             </span>
           </h2>
         </div>
@@ -335,81 +408,72 @@ export default function Dashboard() {
                 <tr className="bg-zinc-900/80 text-[10px] uppercase tracking-widest text-zinc-500">
                   <th className="px-4 py-3 text-left w-8">#</th>
                   <th className="px-4 py-3 text-left">Token</th>
-                  <th className="px-4 py-3 text-left">{platform === 'all' ? 'Top Platform' : 'Platform'}</th>
-                  <th className="px-4 py-3 text-right">Volume (SOL)</th>
-                  <th className="px-4 py-3 text-right">Volume (USD)</th>
+                  <th className="px-4 py-3 text-left">Top Platform</th>
+                  <th className="px-4 py-3 text-right">Vol (SOL)</th>
+                  <th className="px-4 py-3 text-right">Vol (USD)</th>
                   <th className="px-4 py-3 text-right">Net Flow</th>
                   <th className="px-4 py-3 text-left">Buy %</th>
                   <th className="px-4 py-3 text-right">Trades</th>
-                  {sortBy === 'newest' && <th className="px-4 py-3 text-right">First Seen</th>}
+                  <th className="px-4 py-3 text-right">First Seen</th>
                 </tr>
               </thead>
               <tbody>
-                {tokens.length === 0 ? (
+                {displayed.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-12 text-center text-zinc-600 text-sm">
-                      No data yet — waiting for transactions to be ingested...
+                    <td colSpan={9} className="px-4 py-12 text-center text-zinc-600 text-sm">
+                      No activity in the {timeWindow.toUpperCase()} window yet…
                     </td>
                   </tr>
                 ) : (
-                  tokens.map((token, i) => {
+                  displayed.map((token, i) => {
                     const isPositive = token.net_sol >= 0;
                     return (
                       <motion.tr
-                        key={`${token.token_mint}-${token.dominant_platform ?? token.platform ?? 'all'}`}
+                        key={token.mint}
+                        layout
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
-                        transition={{ delay: Math.min(i * 0.02, 0.5) }}
-                        className="border-t border-zinc-800/50 hover:bg-zinc-800/30 transition-colors group"
+                        transition={{ delay: Math.min(i * 0.015, 0.4) }}
+                        className="border-t border-zinc-800/50 hover:bg-zinc-800/30 transition-colors"
                       >
                         <td className="px-4 py-3 text-zinc-600 font-mono text-xs">{i + 1}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isPositive ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                            <CopyMint mint={token.token_mint} />
+                            <CopyMint mint={token.mint} />
                           </div>
                         </td>
                         <td className="px-4 py-3">
-                          <PlatformBadge name={token.dominant_platform ?? token.platform} />
+                          <PlatformBadge name={token.dominant_platform} />
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <span className="font-mono font-bold text-base text-white tabular-nums">
-                            {fmtSol(token.total_sol)}
+                          <span className="font-mono font-bold text-white tabular-nums">
+                            {fmtSol(token.total_volume_sol)}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <span className="font-mono text-xs text-zinc-300">
+                          <span className="font-mono text-xs text-zinc-300 tabular-nums">
                             {fmtUsd(token.total_volume_usd)}
                           </span>
-                          {token.usd_estimated === 1 && (
-                            <span
-                              title="USD estimated from SOL price — token price unavailable"
-                              className="ml-1 text-[9px] text-zinc-600 cursor-help"
-                            >
-                              est.
-                            </span>
-                          )}
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <span className={`font-mono text-xs ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          <span className={`font-mono text-xs tabular-nums ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
                             {isPositive ? '+' : ''}{fmtSol(token.net_sol)}
                           </span>
                         </td>
                         <td className="px-4 py-3">
-                          <BuySellBar buySol={token.buy_sol} sellSol={token.sell_sol} />
+                          <BuySellBar totalSol={token.total_volume_sol} netSol={token.net_sol} />
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <span className="text-zinc-500 text-xs font-mono">
-                            {token.buy_count}B / {token.sell_count}S
+                          <span className="text-zinc-500 text-xs font-mono tabular-nums">
+                            {token.buy_count}B&nbsp;/&nbsp;{token.sell_count}S
                           </span>
                         </td>
-                        {sortBy === 'newest' && (
-                          <td className="px-4 py-3 text-right">
-                            <span className="text-zinc-600 text-xs font-mono">
-                              {fmtAge(token.first_seen)}
-                            </span>
-                          </td>
-                        )}
+                        <td className="px-4 py-3 text-right">
+                          <span className="text-zinc-600 text-xs font-mono">
+                            {fmtAge(token.first_seen)}
+                          </span>
+                        </td>
                       </motion.tr>
                     );
                   })
@@ -420,8 +484,8 @@ export default function Dashboard() {
         </div>
       </section>
 
-<footer className="mt-16 text-center text-zinc-700 text-xs">
-        <p>&copy; 2026 FlowLens. Powered by Chainstack · Pyth · Jupiter</p>
+      <footer className="mt-16 text-center text-zinc-700 text-xs">
+        <p>&copy; 2026 FlowLens · Powered by Chainstack · Pyth · Jupiter</p>
       </footer>
     </main>
   );

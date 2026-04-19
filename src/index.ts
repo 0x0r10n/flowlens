@@ -1,100 +1,124 @@
+import http from 'http';
 import express from 'express';
+import type { RequestHandler } from 'express';
 import dotenv from 'dotenv';
-import * as fs from 'fs';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
-import Database from 'better-sqlite3';
 import cors from 'cors';
-import { PriceService } from './services/PriceService';
-import { SyncService } from './services/SyncService';
-import { TokenPriceService } from './services/TokenPriceService';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import rateLimit from 'express-rate-limit';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
 dotenv.config();
 
-// Startup sequence
-(async () => {
-  await SyncService.syncFeeWallets();
-  PriceService.start();
-})();
+// ─── Global crash guards ──────────────────────────────────────────────────────
+process.on('uncaughtException',  (err)    => logger.error({ err },    'uncaught exception'));
+process.on('unhandledRejection', (reason) => logger.error({ reason }, 'unhandled rejection'));
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// ─── Shared DB (must import before any service that uses it) ─────────────────
+// import { db } from './db.js';
+import { redis } from './redis/client.js';
+import { logger } from './logger.js';
+import { TokenPriceService } from './services/TokenPriceService.js';
+
+// ─── Services & realtime stack ────────────────────────────────────────────────
+import { PriceService } from './services/PriceService.js';
+import { SyncService } from './services/SyncService.js';
+import { BotGeyserSubscriber } from './grpc/BotGeyserSubscriber.js';
+import { ChainstackPoller } from './services/ChainstackPoller.js';
+import { VolumeBroadcaster } from './websocket/VolumeBroadcaster.js';
+import { VolumeAggregator } from './aggregator/VolumeAggregator.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+// ─── App + HTTP server ────────────────────────────────────────────────────────
+const app    = express();
+const server = http.createServer(app);
+const PORT   = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// --- Database Setup (Fix #7: Pre-aggregation View) ---
-const dbPath = path.join(__dirname, '..', 'flowlens.db');
-const db = new Database(dbPath);
+const publicLimiter = rateLimit({ windowMs: 10_000, max: 30, standardHeaders: true, legacyHeaders: false });
+const adminLimiter  = rateLimit({ windowMs: 60_000, max: 5,  standardHeaders: true, legacyHeaders: false });
 
-db.prepare(`
-    CREATE TABLE IF NOT EXISTS platform_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        signature TEXT UNIQUE,
-        timestamp INTEGER,
-        platform TEXT,
-        token_mint TEXT,
-        sol_amount REAL,
-        direction TEXT,
-        usd_value REAL,
-        usd_estimated INTEGER NOT NULL DEFAULT 0,
-        raw_data TEXT
-    )
-`).run();
-
-// Non-destructive migration: add usd_estimated column to existing DBs
-try {
-    db.prepare(`ALTER TABLE platform_events ADD COLUMN usd_estimated INTEGER NOT NULL DEFAULT 0`).run();
-} catch { /* column already exists */ }
-
-db.prepare(`CREATE INDEX IF NOT EXISTS idx_platform_timestamp ON platform_events(platform, timestamp)`).run();
-db.prepare(`CREATE INDEX IF NOT EXISTS idx_token_timestamp ON platform_events(token_mint, timestamp)`).run();
-
-// --- Configuration Helper ---
-let walletToPlatform: Record<string, string> = {};
-
-function refreshPlatformMap() {
-    const platforms = SyncService.getLocalPlatforms();
-    walletToPlatform = {};
-    for (const [platform, wallets] of Object.entries(platforms)) {
-        (wallets as string[]).forEach(wallet => {
-            walletToPlatform[wallet.toLowerCase()] = platform;
-        });
+// Admin auth: if ADMIN_SECRET is set, require `Authorization: Bearer <secret>`.
+// Unset in dev to skip auth entirely.
+const adminAuth: RequestHandler = (req, res, next) => {
+    const secret = process.env.ADMIN_SECRET;
+    if (!secret) { next(); return; }
+    if (req.headers.authorization !== `Bearer ${secret}`) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
     }
-}
-refreshPlatformMap();
+    next();
+};
 
-import { ChainstackPoller } from './services/ChainstackPoller.js';
+// ─── Real-time stack ──────────────────────────────────────────────────────────
+const broadcaster = new VolumeBroadcaster(server);
+const aggregator  = new VolumeAggregator(broadcaster);
 
-// --- Poller Setup ---
-const rpcUrl = process.env.RPC_URL?.trim();
+// ─── Startup ──────────────────────────────────────────────────────────────────
+let geyserInstance: BotGeyserSubscriber | null = null;
 
-if (!rpcUrl || rpcUrl.includes('your_chainstack_rpc_url')) {
-    console.error("❌ ERROR: You must provide a valid Chainstack HTTPS URL in your .env file.");
-    process.exit(1);
-}
+(async () => {
+    // Connect Redis adapter if configured (gracefully optional)
+    if (process.env.REDIS_URL) {
+        await broadcaster.connectRedis(process.env.REDIS_URL);
+    }
 
-if (!rpcUrl.startsWith('http')) {
-    console.error("❌ ERROR: RPC_URL must start with 'http:' or 'https:'. Current value: " + rpcUrl);
-    process.exit(1);
-}
-const poller = new ChainstackPoller(rpcUrl);
-
-// Start the poller asynchronously
-poller.start().catch(err => console.error("Poller failed to start:", err));
-
-// --- Endpoints ---
-
-app.post('/admin/sync', async (req, res) => {
     await SyncService.syncFeeWallets();
-    refreshPlatformMap();
-    res.json({ message: "Sync complete", count: Object.keys(walletToPlatform).length });
-});
+    aggregator.seedFromDb();
+    PriceService.start();
+    TokenPriceService.startBackgroundPricer();
 
-// --- Time window helper ---
+    if (process.env.GEYSER_ENDPOINT && process.env.GEYSER_X_TOKEN) {
+        logger.info('Yellowstone gRPC mode — RPC poller disabled');
+        geyserInstance = new BotGeyserSubscriber();
+        geyserInstance.setTradeHandler(trade => aggregator.ingest(trade));
+        geyserInstance.start().catch(err => logger.error({ err }, 'gRPC start failed'));
+
+        const platforms = Object.keys(SyncService.getLocalPlatforms());
+        await broadcaster.restoreSnapshots(aggregator.allRooms(platforms));
+    } else {
+        const rpcUrl = process.env.RPC_URL?.trim() || '';
+        if (!rpcUrl || rpcUrl.includes('your_chainstack_rpc_url')) {
+            logger.error('Provide GEYSER_ENDPOINT or a valid RPC_URL in .env');
+            process.exit(1);
+        }
+        logger.info('no GEYSER_ENDPOINT — using legacy RPC polling');
+        const poller = new ChainstackPoller(rpcUrl);
+        poller.start().catch(err => logger.error({ err }, 'poller failed'));
+    }
+
+    setInterval(async () => {
+        logger.info('scheduled wallet re-sync');
+        await SyncService.syncFeeWallets();
+        if (geyserInstance) await geyserInstance.reloadWallets();
+    }, 6 * 60 * 60 * 1_000);
+
+    setInterval(() => {
+        if (!geyserInstance) return;
+        const s = geyserInstance.getStats();
+        logger.info({ txs: s.txProcessed, uptimeMin: Math.floor(s.uptimeSeconds / 60), wallets: s.totalWallets, tpm: s.tradesPerMinute }, 'gRPC stats');
+    }, 5 * 60 * 1_000);
+})();
+
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+function shutdown(signal: string) {
+    logger.info({ signal }, 'shutting down gracefully');
+    geyserInstance?.stop();
+    server.close(async () => {
+        await redis.quit();
+        logger.info('shutdown complete');
+        process.exit(0);
+    });
+    // Force-exit if server hasn't closed in 10s
+    setTimeout(() => process.exit(1), 10_000);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
 function getWindowStart(window: string): number {
     const now = Date.now();
     const map: Record<string, number> = {
@@ -107,154 +131,148 @@ function getWindowStart(window: string): number {
     return map[window] ?? map['1h'];
 }
 
-// --- /platforms ---
-app.get('/platforms', (_req, res) => {
-    const platforms = SyncService.getLocalPlatforms();
-    res.json({ platforms: Object.keys(platforms) });
+// ─── Endpoints ────────────────────────────────────────────────────────────────
+
+app.get('/health', (_req, res) => {
+    const stats = geyserInstance?.getStats() ?? null;
+    const mem   = process.memoryUsage();
+    res.json({
+        status:          'ok',
+        uptime:          Math.floor(process.uptime()),
+        solPrice:        PriceService.getCurrentPrice(),
+        memoryMb:        Math.round(mem.rss / 1024 / 1024),
+        streamConnected: stats?.streamConnected ?? null,
+        tradesPerMinute: stats?.tradesPerMinute ?? null,
+        droppedTrades:   stats?.droppedTrades   ?? null,
+        dropRatePct:     stats?.dropRatePct     ?? null,
+        priceService:    TokenPriceService.getCircuitStatus(),
+        redis: {
+            status:  redis.status,
+            prefix:  process.env.REDIS_PREFIX || 'flowlens:',
+        },
+        grpc: stats,
+    });
 });
 
-// --- /tokens ---
-app.get('/tokens', (req, res) => {
+app.post('/admin/sync', adminLimiter, adminAuth, async (_req, res) => {
+    await SyncService.syncFeeWallets();
+    if (geyserInstance) await geyserInstance.reloadWallets();
+    res.json({ message: 'Sync + wallet reload complete' });
+});
+
+app.get('/admin/grpc-stats', adminLimiter, adminAuth, (_req, res) => {
+    if (!geyserInstance) { res.json({ mode: 'rpc-polling', grpc: null }); return; }
+    res.json({ mode: 'grpc', grpc: geyserInstance.getStats() });
+});
+
+app.get('/platforms', publicLimiter, (_req, res) => {
+    res.json({ platforms: Object.keys(SyncService.getLocalPlatforms()) });
+});
+
+// WebSocket room discovery — tells clients exactly what rooms exist and how to use them.
+app.get('/rooms', publicLimiter, (_req, res) => {
+    const platforms = Object.keys(SyncService.getLocalPlatforms());
+    const windows   = ['1m', '5m', '30m', '1h', '24h'];
+    const rooms: string[] = [];
+    for (const w of windows) {
+        rooms.push(`global-volume-${w}`);
+        for (const p of platforms) rooms.push(`platform-${p}-${w}`);
+    }
+    res.json({
+        wsUrl:  process.env.PUBLIC_WS_URL ?? `ws://localhost:${PORT}`,
+        rooms,
+        protocol: {
+            connect:    'io(wsUrl, { transports: ["websocket"] })',
+            join:       'socket.emit("join", roomName)',
+            leave:      'socket.emit("leave", roomName)',
+            onUpdate:   'socket.on("volume-update", payload => ...)',
+            onReconnect: 'socket.on("connect", () => socket.emit("join", lastRoom))',
+            payloadShape: {
+                room:      'string  — e.g. "global-volume-1m" (window encoded in room name)',
+                timestamp: 'number  — ms epoch',
+                tokens:    'TokenSnapshot[]  — sorted by total_volume_sol desc, max 50',
+            },
+            tokenShape: {
+                mint: 'string', dominant_platform: 'string',
+                total_volume_sol: 'number', total_volume_usd: 'number',
+                net_sol: 'number', buy_count: 'number', sell_count: 'number',
+                first_seen: 'number (ms epoch)',
+            },
+        },
+    });
+});
+
+app.get('/tokens', publicLimiter, async (req, res) => {
     try {
-        const windowParam  = (req.query.window   as string) || '1h';
+        const windowParam   = (req.query.window   as string) || '1h';
         const platformParam = (req.query.platform as string) || 'all';
-        const limit        = Math.min(parseInt((req.query.limit as string) || '50'), 200);
-        const sortParam    = req.query.sort as string;
+        const limit         = Math.min(parseInt((req.query.limit as string) || '50'), 200);
+        const sortParam     = req.query.sort as string; // Redis currently handles 'volume' sort primarily
 
-        // Sort options: volume (default) | net | newest
-        const orderClause =
-            sortParam === 'net'    ? 'net_sol DESC' :
-            sortParam === 'newest' ? 'first_seen DESC' :
-            'total_sol DESC';
+        const platform = platformParam === 'all' ? null : platformParam;
+        const tokens   = await aggregator.getTopTokens(windowParam, platform);
 
-        const startTime = getWindowStart(windowParam);
-
-        const AGGREGATES = `
-                SUM(CASE WHEN direction = 'BUY'  THEN sol_amount ELSE 0 END)           AS buy_sol,
-                SUM(CASE WHEN direction = 'SELL' THEN sol_amount ELSE 0 END)           AS sell_sol,
-                SUM(CASE WHEN direction = 'BUY'  THEN sol_amount ELSE -sol_amount END) AS net_sol,
-                SUM(CASE WHEN direction = 'BUY'  THEN usd_value  ELSE -usd_value  END) AS net_usd,
-                SUM(sol_amount)  AS total_sol,
-                SUM(usd_value)   AS total_volume_usd,
-                COUNT(*)         AS trade_count,
-                SUM(CASE WHEN direction = 'BUY'  THEN 1 ELSE 0 END) AS buy_count,
-                SUM(CASE WHEN direction = 'SELL' THEN 1 ELSE 0 END) AS sell_count,
-                MIN(timestamp)   AS first_seen,
-                MAX(usd_estimated) AS usd_estimated
-        `;
-
-        let rows: any[];
-        if (platformParam === 'all') {
-            // Aggregate across all platforms; correlated subquery finds the top platform per token.
-            // Parameters: startTime (subquery), startTime (outer WHERE), limit
-            rows = db.prepare(`
-                SELECT
-                    token_mint,
-                    (
-                        SELECT sub.platform
-                        FROM platform_events sub
-                        WHERE sub.token_mint = main.token_mint AND sub.timestamp >= ?
-                        GROUP BY sub.platform
-                        ORDER BY SUM(sub.sol_amount) DESC
-                        LIMIT 1
-                    ) AS dominant_platform,
-                    ${AGGREGATES}
-                FROM platform_events main
-                WHERE main.timestamp >= ?
-                GROUP BY token_mint
-                ORDER BY ${orderClause}
-                LIMIT ?
-            `).all(startTime, startTime, limit);
-        } else {
-            // Single platform: filter by platform, group by token only
-            rows = db.prepare(`
-                SELECT
-                    token_mint,
-                    platform,
-                    ${AGGREGATES}
-                FROM platform_events
-                WHERE timestamp >= ? AND platform = ?
-                GROUP BY token_mint
-                ORDER BY ${orderClause}
-                LIMIT ?
-            `).all(startTime, platformParam, limit);
+        // Client-side sort fallback if needed (e.g. for 'net' or 'newest')
+        if (sortParam === 'net') {
+            tokens.sort((a, b) => Math.abs(b.net_sol) - Math.abs(a.net_sol));
+        } else if (sortParam === 'newest') {
+            tokens.sort((a, b) => b.first_seen - a.first_seen);
         }
 
         res.json({
             timestamp: Date.now(),
-            window: windowParam,
-            platform: platformParam,
-            solPrice: PriceService.getCurrentPrice(),
-            tokens: rows,
+            window:    windowParam,
+            platform:  platformParam,
+            solPrice:  PriceService.getCurrentPrice(),
+            tokens:    tokens.slice(0, limit),
         });
     } catch (error) {
-        console.error('Tokens API Error:', error);
+        logger.error({ err: error }, 'tokens API error');
         res.status(500).send('Internal Server Error');
     }
 });
 
-app.get('/dashboard', (req, res) => {
+app.get('/dashboard', publicLimiter, async (_req, res) => {
     try {
         const now = Date.now();
-        const intervals = {
-            '1m':  now - 1  * 60 * 1000,
-            '5m':  now - 5  * 60 * 1000,
-            '30m': now - 30 * 60 * 1000,
-            '1h':  now - 60 * 60 * 1000,
-            '24h': now - 24 * 60 * 60 * 1000
-        };
-
-        const platforms = SyncService.getLocalPlatforms();
+        const windows = ['1m', '5m', '30m', '1h', '24h'];
         const results: any = {};
-
-        for (const platform of Object.keys(platforms)) {
+        
+        const platforms = Object.keys(SyncService.getLocalPlatforms());
+        
+        for (const platform of platforms) {
             const volumeData: any = {};
-            for (const [label, startTime] of Object.entries(intervals)) {
-                const row = db.prepare(`
-                    SELECT 
-                        SUM(CASE WHEN direction = 'BUY' THEN sol_amount ELSE -sol_amount END) as net_sol,
-                        SUM(CASE WHEN direction = 'BUY' THEN usd_value ELSE -usd_value END) as net_usd,
-                        COUNT(*) as trade_count
-                    FROM platform_events
-                    WHERE platform = ? AND timestamp >= ?
-                `).get(platform, startTime) as any;
+            let topToken = 'N/A';
+            let topTokenVolume = 0;
 
-                volumeData[label] = {
-                    netSol: row?.net_sol || 0,
-                    netUsd: row?.net_usd || 0,
-                    trades: row?.trade_count || 0
+            for (const win of windows) {
+                const stats = await aggregator.getPlatformStats(platform, win);
+                volumeData[win] = {
+                    netSol:  stats.netSol,
+                    netUsd:  stats.netUsd,
+                    trades:  stats.trades,
                 };
+                if (win === '24h') {
+                    topToken = stats.topToken;
+                    topTokenVolume = stats.topVol;
+                }
             }
 
-            const topTokenRow = db.prepare(`
-                SELECT token_mint, SUM(sol_amount) as total_vol
-                FROM platform_events
-                WHERE platform = ? AND timestamp >= ?
-                GROUP BY token_mint
-                ORDER BY total_vol DESC
-                LIMIT 1
-            `).get(platform, intervals['24h']) as any;
-
             results[platform] = {
-                volumes: volumeData,
-                topToken: topTokenRow?.token_mint || 'N/A',
-                topTokenVolume: topTokenRow?.total_vol || 0
+                volumes:         volumeData,
+                topToken:        topToken,
+                topTokenVolume:  topTokenVolume,
             };
         }
 
-        res.json({
-            timestamp: now,
-            solPrice: PriceService.getCurrentPrice(),
-            platforms: results
-        });
+        res.json({ timestamp: now, solPrice: PriceService.getCurrentPrice(), platforms: results });
     } catch (error) {
-        console.error('Dashboard API Error:', error);
+        logger.error({ err: error }, 'dashboard API error');
         res.status(500).send('Internal Server Error');
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 FlowLens Core LIVE on ${PORT}`);
-    console.log(`💹 Jupiter-Enabled Token Pricing Active`);
-    console.log(`🛡️ Platform Auto-Syncing Active`);
+// ─── Start server ─────────────────────────────────────────────────────────────
+server.listen(PORT, () => {
+    logger.info({ port: PORT }, 'FlowLens live');
 });

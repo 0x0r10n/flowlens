@@ -1,14 +1,59 @@
 {
-  "axiom":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/axiom.ts",
-  "bullx":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/bullx.ts",
-  "gmgn":         "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/gmgnai.ts",
-  "lab-terminal": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/lab-terminal.ts",
-  "photon":       "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/photon.ts",
-  "trojan":       "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/primordium.ts",
-  "banana-gun":   "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/banana-gun.ts",
-  "maestro":      "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/maestro.ts",
-  "bloom":        "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/bloom-sol.ts",
-  "pepeboost":    "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/pepeboost.ts",
-  "nova":         "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/nova-trading.ts",
-  "vector-bot":   "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/vector.ts"
+  "platforms": [
+    {
+      "name": "axiom",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/axiom.ts"
+    },
+    {
+      "name": "bullx",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/bullx.ts"
+    },
+    {
+      "name": "gmgn",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/gmgnai.ts"
+    },
+    {
+      "name": "photon",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/photon.ts"
+    },
+    {
+      "name": "trojan",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/primordium.ts"
+    },
+    {
+      "name": "banana-gun",
+      "enabled": false,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/banana-gun.ts"
+    },
+    {
+      "name": "maestro",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/maestro.ts"
+    },
+    {
+      "name": "lab-terminal",
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/lab-terminal.ts"
+    },
+    {
+      "name": "nova-bloom",
+      "enabled": false,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/nova-trading.ts"
+    },
+    {
+      "name": "vector-bot",
+      "enabled": false,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/vector.ts"
+    },
+    {
+      "name": "pepeboost",
+      "enabled": false,
+      "url": "https://raw.githubusercontent.com/DefiLlama/dimension-adapters/master/fees/pepeboost.ts"
+    }
+  ]
 }

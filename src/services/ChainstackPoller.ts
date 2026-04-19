@@ -1,29 +1,15 @@
 import { Connection, PublicKey, ParsedTransactionWithMeta } from '@solana/web3.js';
-import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { SyncService } from './SyncService.js';
 import { TokenPriceService } from './TokenPriceService.js';
 import { PriceService } from './PriceService.js';
+// import { insertEvent } from '../db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
-const dbPath     = path.join(__dirname, '..', '..', 'flowlens.db');
 const cursorsPath = path.join(__dirname, '..', '..', 'cursors.json');
-const db = new Database(dbPath);
-
-// Ensure the column exists before preparing the statement — this runs
-// before index.ts has a chance to apply its own migration.
-try {
-    db.prepare(`ALTER TABLE platform_events ADD COLUMN usd_estimated INTEGER NOT NULL DEFAULT 0`).run();
-} catch { /* column already exists */ }
-
-const insertEvent = db.prepare(`
-    INSERT OR IGNORE INTO platform_events
-    (signature, timestamp, platform, token_mint, sol_amount, direction, usd_value, usd_estimated, raw_data)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
 
 // ─── Rate-limit backoff constants ────────────────────────────────────────────
 const BACKOFF_BASE_MS = 2_000;
@@ -229,6 +215,7 @@ export class ChainstackPoller {
 
         // ── Persist ───────────────────────────────────────────────────────
         try {
+        /*
             insertEvent.run(
                 signature,
                 timestamp,
@@ -240,6 +227,7 @@ export class ChainstackPoller {
                 usdEstimated,
                 JSON.stringify({ solDiff, tokenDiff: maxDiff })
             );
+            */
             const priceTag = usdEstimated ? '~$' : '$';
             console.log(
                 `✅ [${platform}] ${direction} ${mainMint.slice(0, 8)}…` +

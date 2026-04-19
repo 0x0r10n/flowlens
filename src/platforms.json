@@ -36,11 +36,6 @@
     "dBhdrmwBkRa66XxBuAK4WZeZnsZ6bHeHCCLXa3a8bTJ",
     "6TxjC5wJzuuZgTtnTMipwwULEbMPx5JPW3QwWkdTGnrn"
   ],
-  "lab-terminal": [
-    "Eno27Pu6ok2nNwLTgNCLnFmY2YxQsAXecmrnnLvJeFYh",
-    "3VZjDxp8grQbocYwEisZxSpvpw4XURL1CBwii5gkoAw6",
-    "So11111111111111111111111111111111111111112"
-  ],
   "photon": [
     "AVUCZyuT35YSuj4RH7fwiyPu82Djn2Hfg7y2ND2XcnZH"
   ],
@@ -58,5 +53,10 @@
     "TXNP92LYmnPZzqnXwwsmotizTcNyPGxxEv",
     "MaestroUL88UBnZr3wfoN7hqmNWFi3ZYCGqZoJJHE36",
     "FRMxAnZgkW58zbYcE7Bxqsg99VWpJh6sMP5xLzAWNabN"
+  ],
+  "lab-terminal": [
+    "Eno27Pu6ok2nNwLTgNCLnFmY2YxQsAXecmrnnLvJeFYh",
+    "3VZjDxp8grQbocYwEisZxSpvpw4XURL1CBwii5gkoAw6",
+    "So11111111111111111111111111111111111111112"
   ]
 }
