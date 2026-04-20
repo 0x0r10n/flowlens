@@ -22,9 +22,11 @@ export class VolumeBroadcaster {
             : '*';
 
         this.io = new SocketServer(httpServer, {
-            cors:         { origin: corsOrigin, methods: ['GET', 'POST'] },
+            cors:         { origin: corsOrigin, methods: ['GET', 'POST'], credentials: true },
+            transports:   ['websocket', 'polling'],
             pingInterval: 25_000,
             pingTimeout:  60_000,
+            path:         '/socket.io',
         });
 
         this.io.on('connection', (socket) => {

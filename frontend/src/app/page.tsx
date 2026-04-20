@@ -214,7 +214,14 @@ export default function Dashboard() {
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    const socket = io(WS_URL, { transports: ['websocket'], reconnectionDelay: 2000 });
+    const socket = io(WS_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 12,
+      reconnectionDelay: 1000,
+      timeout: 15000,
+      forceNew: true,
+    });
     socketRef.current = socket;
 
     socket.on('connect', () => {
