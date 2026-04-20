@@ -33,7 +33,7 @@ const __dirname  = path.dirname(__filename);
 // ─── App + HTTP server ────────────────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
-const PORT   = process.env.PORT || 3000;
+const PORT   = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
@@ -274,5 +274,6 @@ app.get('/dashboard', publicLimiter, async (_req, res) => {
 
 // ─── Start server ─────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
-    logger.info({ port: PORT }, 'FlowLens live');
+    console.log(`🚀 FlowLens WebSocket + REST LIVE on http://localhost:${PORT}`);
+    console.log(`   → Will be accessible at http://80.190.80.155:${PORT} on VPS`);
 });

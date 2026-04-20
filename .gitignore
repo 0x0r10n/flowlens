@@ -20,6 +20,7 @@ cursors.json
 .claude/
 
 # Misc
+logs/
 *.log
 .DS_Store
 Thumbs.db

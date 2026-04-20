@@ -3,6 +3,8 @@ import type { Server as HttpServer } from 'http';
 import { logger } from '../logger.js';
 import type { ClientEmitEvents, ServerEmitEvents } from '../types.js';
 
+const PORT = parseInt(process.env.PORT || '3001');
+
 const VALID_ROOM = /^(global-volume|platform-[\w-]+)-(1m|5m|30m|1h|24h)$/;
 
 export class VolumeBroadcaster {
