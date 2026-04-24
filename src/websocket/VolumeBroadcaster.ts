@@ -5,7 +5,7 @@ import type { ClientEmitEvents, ServerEmitEvents } from '../types.js';
 
 const PORT = parseInt(process.env.PORT || '3001');
 
-const VALID_ROOM = /^(global-volume|platform-[\w-]+)-(1m|5m|30m|1h|24h)$/;
+const VALID_ROOM = /^(global-volume|platform-[\w-]+)-(1m|5m|30m|1h|24h|overview)$/;
 
 export class VolumeBroadcaster {
     readonly io: SocketServer<ClientEmitEvents, ServerEmitEvents>;

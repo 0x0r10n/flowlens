@@ -172,7 +172,7 @@ app.get('/platforms', publicLimiter, (_req, res) => {
 // WebSocket room discovery — tells clients exactly what rooms exist and how to use them.
 app.get('/rooms', publicLimiter, (_req, res) => {
     const platforms = Object.keys(SyncService.getLocalPlatforms());
-    const windows   = ['1m', '5m', '30m', '1h', '24h'];
+    const windows   = ['1m', '5m', '30m', '1h', '24h', 'overview'];
     const rooms: string[] = [];
     for (const w of windows) {
         rooms.push(`global-volume-${w}`);
@@ -188,9 +188,9 @@ app.get('/rooms', publicLimiter, (_req, res) => {
             onUpdate:   'socket.on("volume-update", payload => ...)',
             onReconnect: 'socket.on("connect", () => socket.emit("join", lastRoom))',
             payloadShape: {
-                room:      'string  — e.g. "global-volume-1m" (window encoded in room name)',
+                room:      'string  — e.g. "global-volume-1m" or "global-volume-overview"',
                 timestamp: 'number  — ms epoch',
-                tokens:    'TokenSnapshot[]  — sorted by total_volume_sol desc, max 50',
+                tokens:    'TokenSnapshot[] (for regular rooms) OR Record<"1m"|"5m"|"30m"|"1h", TokenSnapshot[]> (for overview rooms)',
             },
             tokenShape: {
                 mint: 'string', dominant_platform: 'string',

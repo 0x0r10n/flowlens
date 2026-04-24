@@ -60,23 +60,59 @@ flowlens/
 
 Clients connect via Socket.IO and join named **rooms**. Each room maps to a platform + time window combination. The server pushes `volume-update` events into the room whenever aggregated data changes (throttled to ~1s).
 
-```
+```text
 Room names:
   global-volume-{window}          — e.g. "global-volume-1h"
   platform-{name}-{window}        — e.g. "platform-axiom-5m"
 
-Windows: 1m | 5m | 30m | 1h | 24h
+Windows: 1m | 5m | 30m | 1h | 24h | overview
 ```
+
+### 1. Connecting to Individual Timeframes
+When connecting to an individual timeframe (like `1h`), the server responds with a simple array of tokens.
 
 ```ts
-const socket = io(WS_URL, { transports: ['websocket'] });
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:3001', { transports: ['websocket'] });
+
 socket.emit('join', 'global-volume-1h');
-socket.on('volume-update', ({ room, timestamp, tokens }) => { /* ... */ });
-// On reconnect:
-socket.on('connect', () => socket.emit('join', lastRoom));
+
+socket.on('volume-update', (payload) => {
+  // payload.room === 'global-volume-1h'
+  // payload.tokens is TokenSnapshot[]
+  console.log(`Received ${payload.tokens.length} tokens for 1h window`);
+});
+
+// Always re-join rooms on reconnect
+socket.on('connect', () => socket.emit('join', 'global-volume-1h'));
 ```
 
-Each `TokenSnapshot` in the `tokens` array:
+### 2. Connecting to the "Overview" Timeframe
+Instead of joining multiple rooms simultaneously, you can join the special `overview` room to receive a single, combined payload containing the `1m`, `5m`, `30m`, and `1h` windows. This guarantees synchronized data and avoids overlapping render updates on the client.
+
+```ts
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:3001', { transports: ['websocket'] });
+
+socket.emit('join', 'global-volume-overview');
+
+socket.on('volume-update', (payload) => {
+  // payload.room === 'global-volume-overview'
+  // payload.tokens is Record<"1m" | "5m" | "30m" | "1h", TokenSnapshot[]>
+  
+  const { '1m': tokens1m, '5m': tokens5m, '30m': tokens30m, '1h': tokens1h } = payload.tokens;
+  
+  console.log('1 Minute Leaders:', tokens1m[0]?.mint);
+  console.log('1 Hour Leaders:', tokens1h[0]?.mint);
+});
+
+// Always re-join rooms on reconnect
+socket.on('connect', () => socket.emit('join', 'global-volume-overview'));
+```
+
+Each `TokenSnapshot` in the `tokens` structure follows this shape:
 
 | Field | Type | Description |
 |---|---|---|

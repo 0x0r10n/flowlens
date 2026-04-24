@@ -91,7 +91,7 @@ export class VolumeAggregator {
 
     allRooms(platforms: string[]): string[] {
         const rooms: string[] = [];
-        for (const w of Object.keys(WINDOWS)) {
+        for (const w of [...Object.keys(WINDOWS), 'overview']) {
             rooms.push(`global-volume-${w}`);
             for (const p of platforms) rooms.push(`platform-${p}-${w}`);
         }
@@ -104,12 +104,18 @@ export class VolumeAggregator {
         const roomsToProcess = [...this.dirtyFlags];
         this.dirtyFlags.clear();
 
+        const overviewPrefixes = new Set<string>();
+
         for (const room of roomsToProcess) {
             try {
                 const parts    = room.split('-');
                 const window   = parts.at(-1)!;
                 const isGlobal = room.startsWith('global-');
                 const platform = isGlobal ? null : parts.slice(1, -1).join('-');
+
+                if (['1m', '5m', '30m', '1h'].includes(window)) {
+                    overviewPrefixes.add(isGlobal ? 'global-volume' : `platform-${platform}`);
+                }
 
                 const snapshot = await this.getTopTokens(window, platform);
                 const payload  = { room, timestamp: Date.now(), tokens: snapshot };
@@ -119,6 +125,38 @@ export class VolumeAggregator {
                 await redis.set(`snapshot:${room}`, JSON.stringify(payload), 'EX', 3600);
             } catch (err) {
                 logger.error({ room, err }, 'Failed to flush room');
+            }
+        }
+
+        // Process composite overview rooms
+        for (const prefix of overviewPrefixes) {
+            try {
+                const room = `${prefix}-overview`;
+                const isGlobal = prefix === 'global-volume';
+                const platform = isGlobal ? null : prefix.replace('platform-', '');
+
+                const [tokens1m, tokens5m, tokens30m, tokens1h] = await Promise.all([
+                    this.getTopTokens('1m', platform),
+                    this.getTopTokens('5m', platform),
+                    this.getTopTokens('30m', platform),
+                    this.getTopTokens('1h', platform)
+                ]);
+
+                const payload = {
+                    room,
+                    timestamp: Date.now(),
+                    tokens: {
+                        '1m': tokens1m,
+                        '5m': tokens5m,
+                        '30m': tokens30m,
+                        '1h': tokens1h
+                    }
+                };
+
+                this.broadcaster.broadcast(room, payload);
+                await redis.set(`snapshot:${room}`, JSON.stringify(payload), 'EX', 3600);
+            } catch (err) {
+                logger.error({ room: `${prefix}-overview`, err }, 'Failed to flush overview room');
             }
         }
     }
